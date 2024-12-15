@@ -62,7 +62,6 @@ class ReplayBufferStorage:
             with save_path.open('wb') as f:
                 f.write(buffer.read())
 
-
 class ReplayBuffer(IterableDataset):
     def __init__(self, replay_dir, max_size, num_workers, nstep, multistep,
                  discount, fetch_every, save_snapshot):
@@ -125,33 +124,26 @@ class ReplayBuffer(IterableDataset):
             traceback.print_exc()
         self._samples_since_last_fetch += 1
         episode = self._sample_episode()
-        # add +1 for the first dummy transition
-        idx = np.random.randint(0, episode_len(episode) - self._nstep + 1) + 1
+        
+        # Add +1 for first dummy transition and ensure room for next state/action
+        idx = np.random.randint(0, episode_len(episode) - 2) + 1
+        
         obs = episode['observation'][idx - 1]
         action = episode['action'][idx]
-        next_obs = episode['observation'][idx + self._nstep - 1]
-        reward = np.zeros_like(episode['reward'][idx])
-        discount = np.ones_like(episode['discount'][idx])
-        for i in range(self._nstep):
-            step_reward = episode['reward'][idx + i]
-            reward += discount * step_reward
-            discount *= episode['discount'][idx + i] * self._discount
+        next_obs = episode['observation'][idx + 1]
+        reward = episode['reward'][idx]
+        discount = episode['discount'][idx]
 
-        # For TACO: get sequence of actions
-        action_seq = episode['action'][idx:idx + self._multistep]
+        # States and actions we need for the SASA sequence
+        states_seq = np.stack([episode['observation'][idx-1], episode['observation'][idx]])
+        actions_seq = np.stack([episode['action'][idx], episode['action'][idx+1]])
 
-        # For Chimichanga: get sequence of state-action pairs
-        states_seq = episode['observation'][idx - 1:idx + 1]  # Get current and next state
-        actions_seq = episode['action'][idx:idx + 2]  # Get current and next action
-
-        # Return both formats to support both agents
-        return (obs, action, action_seq, states_seq, actions_seq, 
-                reward, discount, next_obs, episode['observation'][idx + self._nstep])
+        return (obs, action, action, states_seq, actions_seq, 
+                reward, discount, next_obs, episode['observation'][idx + 1])
 
     def __iter__(self):
         while True:
             yield self._sample()
-
 
 def _worker_init_fn(worker_id):
     seed = np.random.get_state()[1][0] + worker_id

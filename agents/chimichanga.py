@@ -6,6 +6,40 @@ import torch.nn.functional as F
 import utils
 from .drqv2 import Encoder, Actor, Critic
 
+
+class RandomShiftsAug(nn.Module):
+    def __init__(self, pad):
+        super().__init__()
+        self.pad = pad
+
+    def forward(self, x):
+        n, c, h, w = x.size()
+        assert h == w
+        padding = tuple([self.pad] * 4)
+        x = F.pad(x, padding, 'replicate')
+        eps = 1.0 / (h + 2 * self.pad)
+        arange = torch.linspace(-1.0 + eps,
+                                1.0 - eps,
+                                h + 2 * self.pad,
+                                device=x.device,
+                                dtype=x.dtype)[:h]
+        arange = arange.unsqueeze(0).repeat(h, 1).unsqueeze(2)
+        base_grid = torch.cat([arange, arange.transpose(1, 0)], dim=2)
+        base_grid = base_grid.unsqueeze(0).repeat(n, 1, 1, 1)
+
+        shift = torch.randint(0,
+                              2 * self.pad + 1,
+                              size=(n, 1, 1, 2),
+                              device=x.device,
+                              dtype=x.dtype)
+        shift *= 2.0 / (h + 2 * self.pad)
+
+        grid = base_grid + shift
+        return F.grid_sample(x,
+                             grid,
+                             padding_mode='zeros',
+                             align_corners=False)
+        
 class Chimichanga(nn.Module):
     def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, device):
         super().__init__()
@@ -66,7 +100,7 @@ class ChimichangaAgent:
     def __init__(self, obs_shape, action_shape, device, lr, encoder_lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
                  update_every_steps, stddev_schedule, stddev_clip, use_tb,
-                 reward, curl):
+                 reward, curl, *args, **kwargs):
         
         self.device = device
         self.critic_target_tau = critic_target_tau
@@ -186,8 +220,13 @@ class ChimichangaAgent:
         
         # CURL loss
         if self.curl:
-            obs_anchor = self.aug(obs.float())
-            obs_pos = self.aug(obs.float())
+            # Reshape obs to [batch_size, channels, height, width]
+            # Assuming obs shape is [batch_size, 2, channels, height, width]
+            batch_size = obs.shape[0]
+            obs_reshape = obs[:,0]  # Take first state from sequence
+            
+            obs_anchor = self.aug(obs_reshape.float())
+            obs_pos = self.aug(obs_reshape.float())
             z_a = self.chimichanga.encode(obs_anchor)
             z_pos = self.chimichanga.encode(obs_pos, ema=True)
             logits = self.chimichanga.compute_logits(z_a, z_pos)
@@ -232,11 +271,12 @@ class ChimichangaAgent:
         if step % self.update_every_steps != 0:
             return metrics
         
+        # Update unpacking to match new replay buffer format
         batch = next(replay_iter)
-        obs, action, states_actions_seq, reward, discount, next_obs, r_next_obs = utils.to_torch(
+        obs, action, _, states_seq, actions_seq, reward, discount, next_obs, r_next_obs = utils.to_torch(
             batch, self.device)
 
-        # Regular DrQv2 updates
+        # augment
         obs_en = self.aug(obs.float())
         next_obs_en = self.aug(next_obs.float())
         obs_en = self.encoder(obs_en)
@@ -250,9 +290,9 @@ class ChimichangaAgent:
             self.update_critic(obs_en, action, reward, discount, next_obs_en, step))
         metrics.update(self.update_actor(obs_en.detach(), step))
         metrics.update(
-            self.update_chimichanga(states_actions_seq[0], states_actions_seq[1], r_next_obs, reward))
+            self.update_chimichanga(states_seq, actions_seq, r_next_obs, reward))
 
         utils.soft_update_params(self.critic, self.critic_target,
-                               self.critic_target_tau)
+                            self.critic_target_tau)
 
         return metrics
