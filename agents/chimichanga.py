@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import utils
 from .drqv2 import Encoder, Actor, Critic
-
+import itertools
 
 class RandomShiftsAug(nn.Module):
     def __init__(self, pad):
@@ -41,19 +41,20 @@ class RandomShiftsAug(nn.Module):
                              align_corners=False)
         
 class Chimichanga(nn.Module):
-    def __init__(self, repr_dim, feature_dim, action_shape, hidden_dim, encoder, device):
+    def __init__(self, repr_dim, feature_dim, action_shape, latent_a_dim, hidden_dim, act_tok, encoder, device):
         super().__init__()
         self.encoder = encoder
         self.device = device
-        
-        # Project concatenated (s,a,s,a) sequence
+        self.act_tok = act_tok
+        self.aug = RandomShiftsAug(pad=4)
+        # Modify proj_sasa to account for encoded action dimension
         self.proj_sasa = nn.Sequential(
-            nn.Linear(repr_dim*2 + action_shape[0]*2, hidden_dim),
+            nn.Linear(repr_dim*2 + latent_a_dim*2, hidden_dim),  # Note dimension change
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, feature_dim)
         )
         
-        # For reward prediction
+        # Rest of init remains the same
         self.reward = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -69,6 +70,21 @@ class Chimichanga(nn.Module):
         self.W = nn.Parameter(torch.rand(feature_dim, feature_dim))
         self.apply(utils.weight_init)
 
+    def encode_sequence(self, states, actions):
+        # Encode states with augmentation
+        s1, s2 = states[:,0], states[:,1]
+        s1_enc = self.encoder(self.aug(s1.float()))
+        s2_enc = self.encoder(self.aug(s2.float()))
+        
+        # Encode actions
+        a1, a2 = actions[:,0], actions[:,1]
+        a1_enc = self.act_tok(a1)
+        a2_enc = self.act_tok(a2)
+        
+        # Concatenate encoded versions
+        sasa = torch.cat([s1_enc, a1_enc, s2_enc, a2_enc], dim=-1)
+        return self.proj_sasa(sasa)
+
     def encode(self, x, ema=False):
         if ema:
             with torch.no_grad():
@@ -77,18 +93,6 @@ class Chimichanga(nn.Module):
             z_out = self.proj_s(self.encoder(x))
         return z_out
 
-    def encode_sequence(self, states, actions):
-        # Encode states
-        s1, s2 = states[:,0], states[:,1]
-        s1_enc = self.encoder(s1)
-        s2_enc = self.encoder(s2)
-        
-        # Take corresponding actions
-        a1, a2 = actions[:,0], actions[:,1]
-        
-        # Concatenate everything
-        sasa = torch.cat([s1_enc, a1, s2_enc, a2], dim=-1)
-        return self.proj_sasa(sasa)
 
     def compute_logits(self, z_a, z_pos):
         Wz = torch.matmul(self.W, z_pos.T)
@@ -119,12 +123,25 @@ class ChimichangaAgent:
         self.critic_target = Critic(self.encoder.repr_dim, action_shape,
                                    feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
+        
+        latent_a_dim = int(action_shape[0]*1.25)+1
+            
+        self.act_tok = utils.ActionEncoding(action_shape[0], latent_a_dim, 2).to(device)
+        
+        # Add act_tok to parameters being optimized
+        self.encoder_opt = torch.optim.Adam(
+            itertools.chain(self.encoder.parameters(), 
+                        self.act_tok.parameters()),
+            lr=encoder_lr
+        )
 
         self.chimichanga = Chimichanga(
             self.encoder.repr_dim,
             feature_dim,
             action_shape,
+            latent_a_dim,  # act tok
             hidden_dim,
+            self.act_tok,  # act tok
             self.encoder,
             device
         ).to(device)
