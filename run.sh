@@ -20,3 +20,5 @@ conda activate taco
 
 # python train.py agent=taco task=quadruped_run save_video=True exp_name=test_run
 python train.py agent=taco task=cheetah_run save_video=True exp_name=cheetah_test_2 curl=False
+
+python train.py agent=chimichanga task=cheetah_run save_video=True exp_name=chimichanga_cheeta_test_1

@@ -15,8 +15,11 @@ agent:
   stddev_clip: 0.3
   curl: ${curl}
   reward: ${reward}
+  multistep: 2  # Set to 2 for Chimichanga's s,a,s,a pattern
+
 
 ### Chimichanga parameters
 curl: true
 reward: true
 batch_size: 1024
+multistep: 2  # Set to 2 for Chimichanga's s,a,s,a pattern
